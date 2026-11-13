@@ -716,8 +716,8 @@ button { cursor: pointer; }
       if (/\.(csv|txt)$/i.test(file.name)) {
         // CSV text: try UTF-8, fall back to the Hebrew Windows encoding Excel often uses
         let text = new TextDecoder("utf-8").decode(buf);
-        if (text.includes("�")) { try { text = new TextDecoder("windows-1255").decode(buf); } catch (x) {} }
-        wb = XLSX.read(text.replace(/^﻿/, ""), { type: "string" });
+        if (text.includes(String.fromCharCode(0xFFFD))) { try { text = new TextDecoder("windows-1255").decode(buf); } catch (x) {} }
+        wb = XLSX.read(text.replace(/^\uFEFF/, ""), { type: "string" });
       } else wb = XLSX.read(buf, { type: "array" });
       const ws = wb.Sheets[wb.SheetNames[0]];
       rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" });
