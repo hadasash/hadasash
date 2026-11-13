@@ -674,11 +674,11 @@ button { cursor: pointer; }
   function detectColumns(rows) {
     const rules = [
       ["phone", /טלפון|נייד|פלאפון|סלולרי|phone|mobile|tel/i],
-      ["count", /כמות|מספר|מס'|מס׳|מוזמנים|נפשות|כמה|count|qty|guests|#/i],
-      ["side", /^צד|side/i],
-      ["group", /קבוצה|קטגוריה|קרבה|קשר|סוג|group|relation/i],
-      ["last", /משפחה|last/i],
-      ["name", /שם|name|אורח|מוזמן/i],
+      ["count", /כמות|מספר|מס'|מס׳|מוזמנים|נפשות|כמה|count|qty|quantity|amount|guests|party|size|pax|people|seats|invited|#/i],
+      ["side", /^צד|side|bride|groom/i],
+      ["group", /קבוצה|קטגוריה|קרבה|קשר|סוג|group|relation|category|type|circle/i],
+      ["last", /משפחה|last|surname/i],
+      ["name", /שם|name|אורח|מוזמן|^guest$|^invitee$/i],
       ["notes", /הערות|הערה|notes|comment/i]
     ];
     for (let r = 0; r < Math.min(6, rows.length); r++) {
