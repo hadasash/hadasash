@@ -273,8 +273,13 @@ button { cursor: pointer; }
     else if (code === "quota_exceeded") toast("המקום במאגר הנתונים התמלא. מחקי פריטים ישנים ונסי שוב.");
     else toast("השמירה לא הצליחה. בדקי את החיבור ונסי שוב.");
   }
-  async function saveMany(col, items) {
-    for (const it of items) { const ok = await saveDoc(col, it.id, it); if (!ok) return false; }
+  async function saveMany(col, items, onProgress) {
+    for (let i = 0; i < items.length; i += 10) {
+      const chunk = items.slice(i, i + 10);
+      const res = await Promise.all(chunk.map(it => saveDoc(col, it.id, it)));
+      if (res.includes(false)) return false;
+      if (onProgress) onProgress(Math.min(items.length, i + 10), items.length);
+    }
     return true;
   }
 
@@ -366,7 +371,18 @@ button { cursor: pointer; }
     const payHtml = '<section class="card"><div class="grouphead"><h3>תשלומים פתוחים לספקים</h3><span class="muted small num">יתרה: ' + ils(vt.left) + '</span></div><div class="list">' +
       (pays.length ? pays.map(v => '<div class="row clickable" data-act="edit-vendor" data-id="' + esc(v.id) + '"><div class="main"><div class="title">' + esc(v.name) + '</div><div class="meta"><span>' + esc(v.category || "") + "</span>" + (v.payDate ? "<span>לתשלום עד " + esc(fmtDate(v.payDate, { day: "numeric", month: "short" })) + "</span>" : "") + '</div></div><span class="num"><b>' + ils(n(v.price) - n(v.paid)) + "</b></span></div>").join("")
         : '<p class="muted">אין תשלומים פתוחים לספקים שהוזמנו.</p>') + "</div></section>";
-    return hero + stats + nextHtml + payHtml;
+    let rsvpHtml = "";
+    if (S.guests.length) {
+      const rd = reminderDays(), inWindow = d != null && d > 0 && d <= rd;
+      const remDate = st.date ? new Date(new Date(st.date + "T12:00:00").getTime() - rd * 86400000).toISOString().slice(0, 10) : "";
+      const lines = [
+        ["invite", "לא קיבלו הזמנה עדיין", ""],
+        ["nudge", "קיבלו הזמנה ולא ענו", ""],
+        ["reminder", "אישרו, ממתינים לתזכורת", remDate ? (inWindow ? "הגיע הזמן לשלוח!" : "לשלוח ב-" + fmtDate(remDate, { day: "numeric", month: "long" })) : ""]
+      ].map(([k, l, note]) => { const c = sendList(k).length; return '<div class="row"><div class="main"><div class="title"><span class="num">' + c + "</span> " + l + "</div>" + (note ? '<div class="meta"><span class="pill ' + (inWindow ? "warn" : "plain") + '">' + note + "</span></div>" : "") + "</div>" + (c ? '<button class="btn ' + (k === "reminder" && !inWindow ? "ghost " : "") + 'sm" data-act="send-open" data-v="' + k + '" type="button">שליחה</button>' : "") + "</div>"; }).join("");
+      rsvpHtml = '<section class="card"><div class="grouphead"><h3>אישורי הגעה בוואטסאפ</h3></div><div class="list">' + lines + "</div></section>";
+    }
+    return hero + stats + rsvpHtml + nextHtml + payHtml;
   }
 
   function taskRow(t) {
@@ -440,16 +456,59 @@ button { cursor: pointer; }
       (v.notes ? '<div class="small muted">' + esc(v.notes) + "</div>" : "") + "</div></div>";
   }
 
-  function rsvpText(g) {
-    const st = S.settings;
-    const tpl = st.rsvpMsg || "היי {שם}! 💍 אנחנו מתחתנים ושמחים להזמין אותך לחתונה של {זוג}{תאריך}{מקום}. נשמח שתאשרו הגעה וכמה תגיעו 💕";
-    return tpl.replace(/\{שם\}/g, g.name || "").replace(/\{זוג\}/g, st.names || "").replace(/\{תאריך\}/g, st.date ? " ב-" + fmtDate(st.date) : "").replace(/\{מקום\}/g, st.venue ? " ב" + st.venue : "");
+  const MSG = {
+    invite: { label: "הזמנה ואישור הגעה", key: "rsvpMsg", flag: "sent_invite", done: "הזמנה נשלחה",
+      def: "היי {שם}! 💍 אנחנו מתחתנים ושמחים להזמין אותך לחתונה של {זוג}{תאריך}{מקום}. נשמח שתאשרו הגעה וכמה תגיעו 💕",
+      who: g => !g.sent_invite, desc: "כל מי שעוד לא קיבל הזמנה" },
+    nudge: { label: "תזכורת למי שלא ענה", key: "nudgeMsg", flag: "sent_nudge", done: "תזכורת אישור נשלחה",
+      def: "היי {שם}, רק מזכירים 😊 נשמח לדעת אם תגיעו לחתונה של {זוג}{תאריך} וכמה תהיו. תודה!",
+      who: g => g.sent_invite && !g.sent_nudge && ["pending", "maybe"].includes(g.status || "pending"), desc: "קיבלו הזמנה ועדיין לא אישרו" },
+    reminder: { label: "תזכורת לפני החתונה", key: "reminderMsg", flag: "sent_reminder", done: "תזכורת נשלחה",
+      def: "היי {שם}! 🎉 עוד {ימים} ימים אנחנו מתחתנים ומחכים לראות אותך{תאריך}{מקום}. ניווט בוויז: {ניווט}",
+      who: g => g.status === "yes" && !g.sent_reminder, desc: "כל מי שאישר הגעה" }
+  };
+  const sendList = type => S.guests.filter(g => waPhone(g.phone) && MSG[type].who(g)).sort((a, b) => String(a.name).localeCompare(String(b.name), "he"));
+  const reminderDays = () => n(S.settings.reminderDays) || 3;
+  function rsvpText(g, type) {
+    const st = S.settings, m = MSG[type || "invite"];
+    const tpl = st[m.key] || m.def, d = daysUntil(st.date);
+    return tpl.replace(/\{שם\}/g, g.name || "").replace(/\{זוג\}/g, st.names || "").replace(/\{תאריך\}/g, st.date ? " ב-" + fmtDate(st.date, { weekday: "long", day: "numeric", month: "long" }) : "")
+      .replace(/\{מקום\}/g, st.venue ? " ב" + st.venue : "").replace(/\{ימים\}/g, d != null && d > 0 ? d : "כמה")
+      .replace(/\{ניווט\}/g, st.venue ? "https://waze.com/ul?q=" + encodeURIComponent(st.venue) + "&navigate=yes" : "");
+  }
+  const waLink = (g, type) => "https://wa.me/" + waPhone(g.phone) + "?text=" + encodeURIComponent(rsvpText(g, type));
+  function sentPill(g) {
+    const t = g.sent_reminder ? "reminder" : g.sent_nudge ? "nudge" : g.sent_invite ? "invite" : "";
+    return t ? '<span class="pill plain">' + MSG[t].done + "</span>" : "";
+  }
+
+  /* WhatsApp send queue: one tap per guest, then it advances to the next */
+  let sendQ = null;
+  function openSend(type) {
+    if (readOnly) { toast("אין לך הרשאת עריכה באתר הזה"); return; }
+    sendQ = { type, ids: sendList(type).map(g => g.id), i: 0, sent: 0 };
+    renderSend();
+  }
+  function renderSend() {
+    const q = sendQ, root = $("#sheetRoot");
+    const chips = '<div class="chips">' + Object.keys(MSG).map(k => '<button type="button" class="chip' + (q.type === k ? " on" : "") + '" data-act="send-type" data-v="' + k + '">' + MSG[k].label + ' <span class="num">(' + sendList(k).length + ")</span></button>").join("") + "</div>";
+    const g = q.ids[q.i] && find("guests", q.ids[q.i]);
+    let body;
+    if (!q.ids.length) body = '<div class="card empty"><p>אין כרגע אורחים עם טלפון ברשימה הזו (' + MSG[q.type].desc + ').</p></div>';
+    else if (!g) body = '<div class="card empty"><h3>סיימת! 🎉</h3><p>נשלחו ' + q.sent + " הודעות. כשאורחים עונים לך בוואטסאפ, סמני להם ✓ / ✕ ברשימת האורחים.</p></div>";
+    else body = '<div class="card"><div class="grouphead"><span class="muted small num">' + (q.i + 1) + " מתוך " + q.ids.length + '</span><span class="muted small">' + esc(MSG[q.type].desc) + "</span></div>" +
+      '<h3 style="margin-top:6px">' + esc(g.name) + ' <span class="muted small num" dir="ltr">' + esc(g.phone) + "</span></h3>" +
+      '<p class="small" style="white-space:pre-wrap;background:var(--bg);border-radius:10px;padding:10px;margin:8px 0">' + esc(rsvpText(g, q.type)) + "</p>" +
+      '<div class="btnrow"><a class="btn" style="text-decoration:none;flex:1;text-align:center" href="' + esc(waLink(g, q.type)) + '" target="_blank" rel="noopener" data-act="send-go">פתיחה בוואטסאפ</a><button type="button" class="btn ghost" data-act="send-skip">דילוג</button></div>' +
+      '<p class="small muted" style="margin-bottom:0">וואטסאפ ייפתח עם ההודעה מוכנה. לוחצים שם על "שליחה", חוזרים לכאן, והאורח הבא כבר יחכה.</p></div>';
+    root.innerHTML = '<div class="scrim" data-act="close-sheet"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle"><div class="grouphead"><h2 id="sheetTitle">שליחה בוואטסאפ</h2><button type="button" class="iconbtn" data-act="close-sheet">סגירה</button></div>' +
+      '<div style="display:flex;flex-direction:column;gap:12px;margin-top:12px">' + chips + body + '<button type="button" class="btn ghost sm" data-act="settings" style="align-self:flex-start">עריכת נוסחי ההודעות</button></div></div></div>';
   }
 
   function viewGuests() {
     const gt = guestTotals(S.guests);
-    const head = '<div class="viewhead"><div><h2>אורחים</h2><div class="muted small num">' + gt.households + " הזמנות · " + gt.invited + ' מוזמנים</div></div><div class="btnrow"><button class="btn ghost" data-act="bulk-guests" type="button">הוספה מרשימה</button><button class="btn" data-act="add-guest" type="button">+ אורח</button></div></div>';
-    if (!S.guests.length) return head + '<section class="card empty"><p>אפשר להוסיף אורח אחד בכל פעם, או להדביק רשימה שלמה (למשל מאקסל או מאנשי הקשר): שורה לכל אורח עם שם, טלפון ומספר מגיעים.</p><button class="btn" data-act="bulk-guests" type="button">הדבקת רשימת מוזמנים</button></section>';
+    const head = '<div class="viewhead"><div><h2>אורחים</h2><div class="muted small num">' + gt.households + " הזמנות · " + gt.invited + ' מוזמנים</div></div><div class="btnrow"><button class="btn ghost" data-act="send-open" data-v="invite" type="button">שליחה בוואטסאפ</button><button class="btn ghost" data-act="excel-guests" type="button">העלאת אקסל</button><button class="btn ghost" data-act="bulk-guests" type="button">הדבקה</button><button class="btn" data-act="add-guest" type="button">+ אורח</button></div></div>';
+    if (!S.guests.length) return head + '<section class="card empty"><p>יש לכם כבר רשימת מוזמנים באקסל? העלו את הקובץ, והאתר יזהה לבד את העמודות: שם, טלפון, כמות, צד וקבוצה.</p><div class="btnrow" style="justify-content:center"><button class="btn" data-act="excel-guests" type="button">העלאת קובץ אקסל</button><button class="btn ghost" data-act="bulk-guests" type="button">הדבקת רשימה</button></div></section>';
     const stats = '<div class="stats">' +
       '<div class="stat"><div class="label">מגיעים</div><div class="value num" style="color:var(--ok)">' + gt.yes + "</div></div>" +
       '<div class="stat"><div class="label">טרם ענו</div><div class="value num">' + (gt.pending + gt.maybe) + '</div><div class="sub">' + (gt.maybe ? gt.maybe + " אולי" : "") + "</div></div>" +
@@ -462,8 +521,8 @@ button { cursor: pointer; }
     const rows = list.map(g => {
       const st = g.status || "pending", wp = waPhone(g.phone);
       const c = Math.max(1, n(g.count) || 1);
-      return '<div class="row"><div class="main clickable" data-act="edit-guest" data-id="' + esc(g.id) + '"><div class="title">' + esc(g.name) + ' <span class="muted small num">×' + (st === "yes" && n(g.arriving) && n(g.arriving) !== c ? n(g.arriving) + "/" + c : c) + '</span></div><div class="meta">' + (g.side ? "<span>" + esc(g.side) + "</span>" : "") + (g.group ? "<span>" + esc(g.group) + "</span>" : "") + (n(g.gift) ? '<span class="num">🎁 ' + ils(g.gift) + "</span>" : "") + "</div></div>" +
-        (wp ? '<a class="wa" href="https://wa.me/' + wp + "?text=" + encodeURIComponent(rsvpText(g)) + '" target="_blank" rel="noopener" aria-label="שליחת הודעת וואטסאפ ל' + esc(g.name) + '">' + ICONS.wa + "</a>" : "") +
+      return '<div class="row"><div class="main clickable" data-act="edit-guest" data-id="' + esc(g.id) + '"><div class="title">' + esc(g.name) + ' <span class="muted small num">×' + (st === "yes" && n(g.arriving) && n(g.arriving) !== c ? n(g.arriving) + "/" + c : c) + '</span></div><div class="meta">' + (g.side ? "<span>" + esc(g.side) + "</span>" : "") + (g.group ? "<span>" + esc(g.group) + "</span>" : "") + (n(g.gift) ? '<span class="num">🎁 ' + ils(g.gift) + "</span>" : "") + sentPill(g) + "</div></div>" +
+        (wp ? '<a class="wa" href="' + esc(waLink(g, "invite")) + '" target="_blank" rel="noopener" data-act="wa-row" data-id="' + esc(g.id) + '" aria-label="שליחת הודעת וואטסאפ ל' + esc(g.name) + '">' + ICONS.wa + "</a>" : "") +
         '<div class="rsvp" role="group" aria-label="סטטוס הגעה">' +
         '<button type="button" class="yes' + (st === "yes" ? " on" : "") + '" data-act="rsvp" data-id="' + esc(g.id) + '" data-v="yes" aria-label="מגיעים">✓</button>' +
         '<button type="button" class="maybe' + (st === "maybe" ? " on" : "") + '" data-act="rsvp" data-id="' + esc(g.id) + '" data-v="maybe" aria-label="אולי">?</button>' +
@@ -493,7 +552,7 @@ button { cursor: pointer; }
       else body += fieldHtml(f, o.values[f.k]);
     });
     root.innerHTML = '<div class="scrim" data-act="close-sheet"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle"><div class="grouphead"><h2 id="sheetTitle">' + esc(o.title) + '</h2><button type="button" class="iconbtn" data-act="close-sheet">סגירה</button></div>' +
-      (o.intro ? '<p class="muted small">' + o.intro + "</p>" : "") +
+      (o.intro ? '<p class="muted small">' + o.intro + "</p>" : "") + (o.html || "") +
       '<form id="sheetForm" novalidate>' + body + '<div class="actions"><button class="btn" type="submit">שמירה</button>' + (o.onDelete ? '<button class="btn danger" type="button" id="delBtn">מחיקה</button>' : "") + "</div></form></div></div>";
     const form = $("#sheetForm");
     const first = form.querySelector("input,select,textarea"); if (first && !o.values.id) setTimeout(() => first.focus(), 50);
@@ -583,13 +642,138 @@ button { cursor: pointer; }
       }
     });
   }
+  /* ---------- Excel import ---------- */
+  let xlsxPromise = null;
+  function loadXLSX() {
+    if (window.XLSX) return Promise.resolve(window.XLSX);
+    if (!xlsxPromise) xlsxPromise = new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+      s.onload = () => window.XLSX ? res(window.XLSX) : rej(new Error("no XLSX"));
+      s.onerror = () => { xlsxPromise = null; rej(new Error("load failed")); };
+      document.head.appendChild(s);
+    });
+    return xlsxPromise;
+  }
+  function pickExcel() {
+    if (readOnly) { toast("אין לך הרשאת עריכה באתר הזה"); return; }
+    const inp = document.createElement("input");
+    inp.type = "file"; inp.accept = ".xlsx,.xls,.csv,.ods";
+    inp.addEventListener("change", () => { if (inp.files && inp.files[0]) readExcel(inp.files[0]); });
+    loadXLSX().catch(() => {});
+    inp.click();
+  }
+  const cellStr = v => String(v == null ? "" : v).trim();
+  function normPhone(v) {
+    let s = cellStr(v);
+    const d = s.replace(/\D/g, "");
+    if (d.length === 9 && d[0] === "5") return "0" + d;
+    if (d.length === 12 && d.startsWith("972")) return "0" + d.slice(3);
+    return s;
+  }
+  function detectColumns(rows) {
+    const rules = [
+      ["phone", /טלפון|נייד|פלאפון|סלולרי|phone|mobile|tel/i],
+      ["count", /כמות|מספר|מס'|מס׳|מוזמנים|נפשות|כמה|count|qty|guests|#/i],
+      ["side", /^צד|side/i],
+      ["group", /קבוצה|קטגוריה|קרבה|קשר|סוג|group|relation/i],
+      ["last", /משפחה|last/i],
+      ["name", /שם|name|אורח|מוזמן/i],
+      ["notes", /הערות|הערה|notes|comment/i]
+    ];
+    for (let r = 0; r < Math.min(6, rows.length); r++) {
+      const map = {};
+      rows[r].forEach((h, i) => {
+        const t = cellStr(h); if (!t || t.length > 30) return;
+        const hit = rules.find(([k, re]) => re.test(t) && map[k] == null);
+        if (hit) map[hit[0]] = i;
+      });
+      if (map.name == null && map.last != null) { map.name = map.last; delete map.last; }
+      if (map.name != null) return { map, start: r + 1, header: true };
+    }
+    // No header row: guess from the data
+    const sample = rows.slice(0, 20), cols = Math.max(0, ...sample.map(r => r.length));
+    const map = {};
+    for (let i = 0; i < cols; i++) {
+      const vals = sample.map(r => cellStr(r[i])).filter(Boolean);
+      if (!vals.length) continue;
+      const digits = vals.map(v => v.replace(/\D/g, ""));
+      if (map.phone == null && digits.filter(d => d.length >= 7).length >= vals.length * .6) map.phone = i;
+      else if (map.count == null && vals.every(v => /^\d{1,2}$/.test(v))) map.count = i;
+      else if (map.name == null && digits.filter(d => d.length === 0).length >= vals.length * .6) map.name = i;
+    }
+    if (map.name == null) map.name = 0;
+    return { map, start: 0, header: false };
+  }
+  async function readExcel(file) {
+    toast("קורא את הקובץ…");
+    let XLSX;
+    try { XLSX = await loadXLSX(); } catch (e) { toast("לא הצלחנו לטעון את קורא האקסל. בדקי את החיבור לאינטרנט."); return; }
+    let rows;
+    try {
+      const buf = await file.arrayBuffer();
+      let wb;
+      if (/\.(csv|txt)$/i.test(file.name)) {
+        // CSV text: try UTF-8, fall back to the Hebrew Windows encoding Excel often uses
+        let text = new TextDecoder("utf-8").decode(buf);
+        if (text.includes("�")) { try { text = new TextDecoder("windows-1255").decode(buf); } catch (x) {} }
+        wb = XLSX.read(text.replace(/^﻿/, ""), { type: "string" });
+      } else wb = XLSX.read(buf, { type: "array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" });
+    } catch (e) { toast("לא הצלחנו לקרוא את הקובץ. ודאי שזה קובץ אקסל או CSV."); return; }
+    rows = (rows || []).filter(r => r.some(c => cellStr(c)));
+    if (!rows.length) { toast("הקובץ ריק"); return; }
+    const { map, start } = detectColumns(rows);
+    const existing = new Set(S.guests.map(g => (g.name || "").trim() + "|" + waPhone(g.phone)));
+    const seen = new Set();
+    let dup = 0;
+    const guests = [];
+    rows.slice(start).forEach(r => {
+      let name = cellStr(r[map.name]);
+      if (map.last != null && map.last !== map.name) name = (name + " " + cellStr(r[map.last])).trim();
+      if (!name) return;
+      const phone = map.phone != null ? normPhone(r[map.phone]) : "";
+      const key = name + "|" + waPhone(phone);
+      if (existing.has(key) || seen.has(key)) { dup++; return; }
+      seen.add(key);
+      const sideRaw = map.side != null ? cellStr(r[map.side]) : "";
+      const side = /כלה|bride/i.test(sideRaw) ? "צד כלה" : /חתן|groom/i.test(sideRaw) ? "צד חתן" : /משות|both/i.test(sideRaw) ? "משותף" : "";
+      guests.push({ id: uid(), name, phone, count: map.count != null ? Math.max(1, n(r[map.count]) || 1) : 1, side, group: map.group != null ? cellStr(r[map.group]) : "", notes: map.notes != null ? cellStr(r[map.notes]) : "", status: "pending", arriving: 0, gift: 0 });
+    });
+    if (!guests.length) { toast(dup ? "כל האורחים בקובץ כבר קיימים ברשימה" : "לא נמצאו שמות בקובץ"); return; }
+    const labels = { name: "שם", last: "שם משפחה", phone: "טלפון", count: "כמות", side: "צד", group: "קבוצה", notes: "הערות" };
+    const found = Object.keys(map).map(k => labels[k]).filter(Boolean);
+    const missingSide = guests.some(g => !g.side), people = guests.reduce((s, g) => s + g.count, 0);
+    const preview = guests.slice(0, 5).map(g => '<div class="row"><div class="main"><div class="title">' + esc(g.name) + ' <span class="muted small num">×' + g.count + '</span></div><div class="meta">' + (g.phone ? '<span class="num" dir="ltr">' + esc(g.phone) + "</span>" : "") + (g.side ? "<span>" + esc(g.side) + "</span>" : "") + (g.group ? "<span>" + esc(g.group) + "</span>" : "") + "</div></div></div>").join("");
+    const html = '<div class="card"><div class="small"><b class="num">' + guests.length + " הזמנות (" + people + ' מוזמנים)</b> מהקובץ ' + esc(file.name) + "</div>" +
+      '<div class="small muted">עמודות שזוהו: ' + esc(found.join(", ")) + (dup ? " · " + dup + " כפולים או קיימים ידולגו" : "") + "</div>" +
+      '<div class="list" style="margin-top:6px">' + preview + "</div>" + (guests.length > 5 ? '<div class="small muted">ועוד ' + (guests.length - 5) + "…</div>" : "") + "</div>";
+    const fields = [];
+    if (missingSide) fields.push({ k: "side", label: "צד לאורחים שאין להם צד בקובץ", type: "select", options: SIDES });
+    if (map.group == null) fields.push({ k: "group", label: "קבוצה (רשות)", list: ["משפחה", "חברים", "עבודה"] });
+    openSheet({
+      title: "ייבוא מוזמנים מאקסל", values: {}, html, fields,
+      intro: "בדקי שהעמודות זוהו נכון. אם משהו לא מסתדר, אפשר לשנות את שורת הכותרות בקובץ (למשל: שם, טלפון, כמות, צד, קבוצה) ולהעלות שוב.",
+      onSave: async d => {
+        guests.forEach(g => { if (!g.side) g.side = d.side || SIDES[0]; if (!g.group && d.group) g.group = d.group; });
+        const ok = await saveMany("guests", guests, (i, t) => toast("שומר " + i + " מתוך " + t + "…"));
+        if (ok) toast("נוספו " + guests.length + " הזמנות 🎉");
+        return ok;
+      }
+    });
+  }
+
   function editSettings() {
     openSheet({
       title: "פרטי החתונה", values: S.settings,
       fields: [{ k: "names", label: "השמות שלכם", ph: "למשל: הדס & יונתן" }, [{ k: "date", label: "תאריך החתונה", type: "date" }, { k: "budget", label: "תקציב כולל (₪)", type: "number" }], { k: "venue", label: "מקום האירוע" },
-        { k: "rsvpMsg", label: "נוסח הודעת וואטסאפ לאורחים", type: "textarea", ph: "היי {שם}! … {זוג} {תאריך} {מקום}" }],
-      intro: "בנוסח ההודעה אפשר להשתמש ב-{שם}, {זוג}, {תאריך} ו-{מקום}, והם יוחלפו אוטומטית.",
-      onSave: d => saveDoc("settings", "main", Object.assign({}, S.settings, d, { budget: n(d.budget) }))
+        { k: "rsvpMsg", label: "הודעת הזמנה ואישור הגעה", type: "textarea", def: MSG.invite.def },
+        { k: "nudgeMsg", label: "תזכורת למי שלא ענה", type: "textarea", def: MSG.nudge.def },
+        { k: "reminderMsg", label: "תזכורת לפני החתונה (למי שאישר)", type: "textarea", def: MSG.reminder.def },
+        { k: "reminderDays", label: "כמה ימים לפני החתונה לשלוח תזכורת", type: "number", def: "3" }],
+      intro: "בנוסחי ההודעות אפשר להשתמש ב-{שם}, {זוג}, {תאריך}, {מקום}, {ימים} (ימים שנותרו) ו-{ניווט} (קישור לוויז), והם יוחלפו אוטומטית לכל אורח.",
+      onSave: d => saveDoc("settings", "main", Object.assign({}, S.settings, d, { budget: n(d.budget), reminderDays: n(d.reminderDays) || 3 }))
     });
   }
 
@@ -600,9 +784,27 @@ button { cursor: pointer; }
     const el = e.target.closest("[data-act]");
     if (!el) return;
     const act = el.dataset.act, id = el.dataset.id;
-    if (act === "close-sheet") { if (e.target === el || el.tagName === "BUTTON") closeSheet(); return; }
-    if (el.closest(".sheet") && act !== "close-sheet") return;
+    if (act === "close-sheet") { if (e.target === el || el.tagName === "BUTTON") { closeSheet(); sendQ = null; } return; }
+    if (el.closest(".sheet") && !/^send-|^settings$/.test(act)) return;
     switch (act) {
+      case "send-open": openSend(el.dataset.v); break;
+      case "send-type": openSend(el.dataset.v); break;
+      case "send-skip": if (sendQ) { sendQ.i++; renderSend(); } break;
+      case "send-go": {
+        // let the link open WhatsApp, then mark as sent and advance
+        const q = sendQ, g = q && find("guests", q.ids[q.i]); if (!g) break;
+        const flag = MSG[q.type].flag;
+        setTimeout(() => {
+          saveDoc("guests", g.id, Object.assign({}, g, { [flag]: new Date().toISOString().slice(0, 10) }));
+          if (sendQ === q) { q.i++; q.sent++; renderSend(); }
+        }, 400);
+        break;
+      }
+      case "wa-row": {
+        const g = find("guests", id);
+        if (g && !g.sent_invite) setTimeout(() => saveDoc("guests", id, Object.assign({}, g, { sent_invite: new Date().toISOString().slice(0, 10) })), 400);
+        break;
+      }
       case "tab": tab = el.dataset.tab; try { localStorage.setItem("wed-tab", tab); } catch (x) {} render(); window.scrollTo(0, 0); break;
       case "settings": editSettings(); break;
       case "add-task": editTask(); break;
@@ -628,6 +830,7 @@ button { cursor: pointer; }
       case "add-guest": editGuest(); break;
       case "edit-guest": editGuest(find("guests", id)); break;
       case "bulk-guests": bulkGuests(); break;
+      case "excel-guests": pickExcel(); break;
       case "guest-side": ui.guestSide = el.dataset.v; render(); break;
       case "guest-status-f": ui.guestStatus = el.dataset.v; render(); break;
       case "rsvp": {
